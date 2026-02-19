@@ -1,0 +1,14 @@
+[project]
+name = "stanley-kaleidoscope"
+version = "1.0.0"
+description = "A kaleidoscope image effect application for macOS"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "PyQt6>=6.6.0",
+    "numpy>=1.26.0",
+    "Pillow>=10.0.0",
+    "pyinstaller>=6.3.0",
+]
+
+[tool.uv]
+dev-dependencies = []

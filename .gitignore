@@ -1,0 +1,18 @@
+# Build artifacts
+build/
+dist/
+
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS
+.DS_Store
+
+# uv
+uv.lock
