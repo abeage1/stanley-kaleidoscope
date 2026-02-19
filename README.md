@@ -1,13 +1,14 @@
 # Stanley Kaleidoscope
 
-A self-contained macOS desktop app that applies classic radial kaleidoscope effects to images — no setup, no command line required.
+A self-contained macOS desktop app that applies kaleidoscope effects to images — no setup, no command line required.
 
 Double-click `Stanley Kaleidoscope.app` to launch.
 
 ## Features
 
-- **Live preview** — all controls update the kaleidoscope in real time
-- **5 adjustable parameters** — segments, rotation, zoom, and center X/Y
+- **5 kaleidoscope modes** — Radial, Rectangle, and three triangle types (45-45-90, 60-60-60, 30-60-90)
+- **Live preview** — all controls update in real time with 120ms debounce
+- **Adjustable parameters** — segments/tile size, rotation, zoom, and center X/Y
 - **Clickable/draggable thumbnail** — set the sampling center point visually
 - **Full-resolution export** — preview is downscaled for speed; save uses the original
 - **Drag-and-drop** support for opening images
@@ -48,12 +49,23 @@ build_app.sh                # One-command build script
 pyproject.toml              # Dependencies (uv)
 ```
 
+## Modes
+
+| Mode | Description |
+|---|---|
+| **Radial** | Classic N-segment mirror-wedge (all segments meet at the center) |
+| **Rectangle** | Mirror-fold in X and Y independently; adjustable aspect ratio |
+| **Triangle 45-45-90** | Right isosceles triangle — 8-fold symmetry of the square |
+| **Triangle 60-60-60** | Equilateral triangle — true mirror fold on the triangular lattice |
+| **Triangle 30-60-90** | Right scalene triangle — tiles the 1:√3 rectangle |
+
 ## Controls
 
-| Control | Range | Default |
-|---|---|---|
-| Segments | 2 – 24 | 8 |
-| Rotation | 0° – 360° | 0° |
-| Zoom | 0.10× – 3.00× | 1.00× |
-| Center X | 0% – 100% | 50% |
-| Center Y | 0% – 100% | 50% |
+| Control | Radial range | Tile modes range | Default |
+|---|---|---|---|
+| Segments / Tile Size | 2 – 24 segments | 5% – 200% of image | 8 / 50% |
+| Tile Aspect *(Rectangle only)* | — | 0.25× – 4.00× | 1.00× |
+| Rotation | 0° – 360° | 0° – 360° | 0° |
+| Zoom | 0.10× – 3.00× | 0.10× – 3.00× | 1.00× |
+| Center X | 0% – 100% | 0% – 100% | 50% |
+| Center Y | 0% – 100% | 0% – 100% | 50% |

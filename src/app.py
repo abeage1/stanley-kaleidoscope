@@ -2,12 +2,11 @@
 MainWindow: layout, sliders, signals, save, drag-and-drop.
 """
 
-import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, UnidentifiedImageError
-from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import (
     QDragEnterEvent,
     QDropEvent,
@@ -20,7 +19,9 @@ from PyQt6.QtGui import (
     QPaintEvent,
 )
 from PyQt6.QtWidgets import (
+    QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -31,22 +32,28 @@ from PyQt6.QtWidgets import (
     QStatusBar,
     QVBoxLayout,
     QWidget,
-    QGroupBox,
-    QFrame,
 )
 
 from worker import KaleidoscopeWorker
-from kaleidoscope import apply_kaleidoscope
+from kaleidoscope import apply_effect, MODES
 
-# Maximum dimension for live-preview source (keeps UI snappy)
 PREVIEW_MAX_DIM = 4096
 THUMBNAIL_SIZE = 240
 
+# Per-mode slider-1 configuration: (range_lo, range_hi, default, label_fn)
+_MODE_PARAM1 = {
+    "radial":         (2,   24,  8,   lambda v: f"Segments: {v}"),
+    "rectangle":      (5,  200, 50,   lambda v: f"Tile Size: {v}%"),
+    "triangle_45":    (5,  200, 50,   lambda v: f"Tile Size: {v}%"),
+    "triangle_60":    (5,  200, 50,   lambda v: f"Tile Size: {v}%"),
+    "triangle_30_60": (5,  200, 50,   lambda v: f"Tile Size: {v}%"),
+}
+
 
 class ThumbnailLabel(QLabel):
-    """QLabel that shows the source image thumbnail with a draggable crosshair."""
+    """QLabel showing the source thumbnail with a draggable crosshair."""
 
-    center_changed = None  # set to a callable by MainWindow
+    center_changed = None  # set to callable by MainWindow
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -55,6 +62,10 @@ class ThumbnailLabel(QLabel):
         self._center_x_pct = 50.0
         self._center_y_pct = 50.0
         self._has_image = False
+        self._img_w = 0
+        self._img_h = 0
+        self._img_x_off = 0
+        self._img_y_off = 0
         self._show_placeholder()
 
     def _show_placeholder(self):
@@ -66,18 +77,14 @@ class ThumbnailLabel(QLabel):
     def set_image(self, pil_img: Image.Image):
         img = pil_img.copy()
         img.thumbnail((THUMBNAIL_SIZE, THUMBNAIL_SIZE), Image.LANCZOS)
-        # Convert to RGB for display
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGB")
         arr = np.asarray(img)
         h, w = arr.shape[:2]
-        if arr.ndim == 2:
-            arr = np.stack([arr] * 3, axis=-1)
-        ch = arr.shape[2]
+        ch = arr.shape[2] if arr.ndim == 3 else 1
         fmt = QImage.Format.Format_RGBA8888 if ch == 4 else QImage.Format.Format_RGB888
         bpl = w * ch
         qimg = QImage(np.ascontiguousarray(arr).tobytes(), w, h, bpl, fmt)
-        # Center in the fixed 240×240 box with dark background
         canvas = QPixmap(THUMBNAIL_SIZE, THUMBNAIL_SIZE)
         canvas.fill(QColor(45, 45, 48))
         painter = QPainter(canvas)
@@ -110,7 +117,6 @@ class ThumbnailLabel(QLabel):
             )
             painter.end()
             return
-        # Draw crosshair at center position
         cx = self._img_x_off + int(self._center_x_pct / 100.0 * self._img_w)
         cy = self._img_y_off + int(self._center_y_pct / 100.0 * self._img_h)
         painter = QPainter(self)
@@ -118,9 +124,6 @@ class ThumbnailLabel(QLabel):
         painter.setPen(pen)
         painter.drawLine(cx, self._img_y_off, cx, self._img_y_off + self._img_h)
         painter.drawLine(self._img_x_off, cy, self._img_x_off + self._img_w, cy)
-        # Circle around crosshair
-        pen2 = QPen(QColor(255, 60, 60), 1)
-        painter.setPen(pen2)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(cx - 6, cy - 6, 12, 12)
         painter.end()
@@ -153,13 +156,14 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Stanley Kaleidoscope")
-        self.setMinimumSize(900, 600)
+        self.setMinimumSize(960, 600)
         self.setAcceptDrops(True)
 
-        self._pil_original: Image.Image | None = None  # full-resolution
-        self._pil_preview: Image.Image | None = None   # downscaled for live render
-        self._preview_arr: np.ndarray | None = None    # numpy of preview image
+        self._pil_original: Image.Image | None = None
+        self._pil_preview: Image.Image | None = None
+        self._preview_arr: np.ndarray | None = None
         self._worker: KaleidoscopeWorker | None = None
+
         self._debounce_timer = QTimer(self)
         self._debounce_timer.setSingleShot(True)
         self._debounce_timer.setInterval(120)
@@ -175,15 +179,12 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root_layout = QHBoxLayout(central)
-        root_layout.setContentsMargins(8, 8, 8, 8)
-        root_layout.setSpacing(8)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
 
-        # Left: thumbnail panel
-        left = self._build_left_panel()
-        root_layout.addWidget(left)
+        root.addWidget(self._build_left_panel())
 
-        # Center: preview
         self._preview_label = QLabel()
         self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preview_label.setSizePolicy(
@@ -195,13 +196,10 @@ class MainWindow(QMainWindow):
         )
         self._preview_label.setText("Open an image to see the kaleidoscope effect")
         self._preview_label.setWordWrap(True)
-        root_layout.addWidget(self._preview_label, stretch=3)
+        root.addWidget(self._preview_label, stretch=3)
 
-        # Right: controls panel
-        right = self._build_right_panel()
-        root_layout.addWidget(right)
+        root.addWidget(self._build_right_panel())
 
-        # Status bar
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
 
@@ -212,9 +210,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
 
-        label = QLabel("Source Image")
-        label.setStyleSheet("font-weight: bold; color: #cccccc;")
-        layout.addWidget(label)
+        lbl = QLabel("Source Image")
+        lbl.setStyleSheet("font-weight: bold; color: #cccccc;")
+        layout.addWidget(lbl)
 
         self._thumbnail = ThumbnailLabel()
         self._thumbnail.center_changed = self._on_center_drag
@@ -229,7 +227,7 @@ class MainWindow(QMainWindow):
 
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setFixedWidth(220)
+        panel.setFixedWidth(230)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(8)
@@ -248,40 +246,63 @@ class MainWindow(QMainWindow):
         self._btn_reset.clicked.connect(self._reset_all)
         layout.addWidget(self._btn_reset)
 
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setStyleSheet("color: #3c3c3c;")
-        layout.addWidget(separator)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #3c3c3c;")
+        layout.addWidget(sep)
 
-        # Sliders
-        self._lbl_segments, self._sld_segments = self._add_slider(
-            layout, "Segments", 2, 24, 8
-        )
-        self._lbl_rotation, self._sld_rotation = self._add_slider(
-            layout, "Rotation", 0, 3600, 0
-        )
-        self._lbl_zoom, self._sld_zoom = self._add_slider(
-            layout, "Zoom", 10, 300, 100
-        )
-        self._lbl_cx, self._sld_cx = self._add_slider(
-            layout, "Center X", 0, 1000, 500
-        )
-        self._lbl_cy, self._sld_cy = self._add_slider(
-            layout, "Center Y", 0, 1000, 500
-        )
+        # Mode selector
+        mode_label = QLabel("Mode:")
+        mode_label.setStyleSheet("color: #cccccc; font-size: 12px;")
+        layout.addWidget(mode_label)
 
-        self._update_slider_labels()
+        self._mode_combo = QComboBox()
+        for key, display in MODES.items():
+            self._mode_combo.addItem(display, userData=key)
+        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        layout.addWidget(self._mode_combo)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color: #3c3c3c;")
+        layout.addWidget(sep2)
+
+        # Param 1 (Segments or Tile Size — always visible)
+        self._lbl_param1 = QLabel()
+        self._lbl_param1.setStyleSheet("color: #cccccc; font-size: 12px;")
+        layout.addWidget(self._lbl_param1)
+        self._sld_param1 = QSlider(Qt.Orientation.Horizontal)
+        self._sld_param1.valueChanged.connect(self._on_slider_changed)
+        layout.addWidget(self._sld_param1)
+
+        # Param 2 (Tile Aspect — Rectangle only)
+        self._lbl_param2 = QLabel()
+        self._lbl_param2.setStyleSheet("color: #cccccc; font-size: 12px;")
+        layout.addWidget(self._lbl_param2)
+        self._sld_param2 = QSlider(Qt.Orientation.Horizontal)
+        self._sld_param2.setRange(25, 400)
+        self._sld_param2.setValue(100)
+        self._sld_param2.valueChanged.connect(self._on_slider_changed)
+        layout.addWidget(self._sld_param2)
+
+        # Shared sliders
+        self._lbl_rotation, self._sld_rotation = self._add_slider(layout, 0, 3600, 0)
+        self._lbl_zoom,     self._sld_zoom     = self._add_slider(layout, 10, 300, 100)
+        self._lbl_cx,       self._sld_cx       = self._add_slider(layout, 0, 1000, 500)
+        self._lbl_cy,       self._sld_cy       = self._add_slider(layout, 0, 1000, 500)
 
         layout.addStretch()
+
+        # Apply initial mode state (radial)
+        self._apply_mode_ui("radial", init=True)
+        self._update_slider_labels()
+
         return panel
 
-    def _add_slider(
-        self, layout: QVBoxLayout, name: str, lo: int, hi: int, default: int
-    ) -> tuple[QLabel, QSlider]:
+    def _add_slider(self, layout, lo, hi, default) -> tuple[QLabel, QSlider]:
         lbl = QLabel()
         lbl.setStyleSheet("color: #cccccc; font-size: 12px;")
         layout.addWidget(lbl)
-
         sld = QSlider(Qt.Orientation.Horizontal)
         sld.setRange(lo, hi)
         sld.setValue(default)
@@ -290,21 +311,59 @@ class MainWindow(QMainWindow):
         return lbl, sld
 
     # ------------------------------------------------------------------ #
+    # Mode management                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _current_mode(self) -> str:
+        return self._mode_combo.currentData()
+
+    def _apply_mode_ui(self, mode: str, init: bool = False):
+        """Update param1 range/default and param2 visibility for the given mode."""
+        lo, hi, default, _ = _MODE_PARAM1[mode]
+        self._sld_param1.blockSignals(True)
+        self._sld_param1.setRange(lo, hi)
+        if init or self._sld_param1.value() < lo or self._sld_param1.value() > hi:
+            self._sld_param1.setValue(default)
+        self._sld_param1.blockSignals(False)
+
+        show_aspect = mode == "rectangle"
+        self._lbl_param2.setVisible(show_aspect)
+        self._sld_param2.setVisible(show_aspect)
+
+    def _on_mode_changed(self):
+        mode = self._current_mode()
+        self._apply_mode_ui(mode)
+        self._update_slider_labels()
+        self._schedule_update()
+
+    # ------------------------------------------------------------------ #
     # Slider helpers                                                       #
     # ------------------------------------------------------------------ #
 
     def _current_params(self) -> dict:
-        return {
-            "num_segments": self._sld_segments.value(),
+        mode = self._current_mode()
+        p = {
+            "mode": mode,
             "rotation_deg": self._sld_rotation.value() / 10.0,
-            "zoom": self._sld_zoom.value() / 100.0,
+            "zoom":         self._sld_zoom.value() / 100.0,
             "center_x_pct": self._sld_cx.value() / 10.0,
             "center_y_pct": self._sld_cy.value() / 10.0,
         }
+        if mode == "radial":
+            p["num_segments"] = self._sld_param1.value()
+        else:
+            p["tile_size_pct"] = float(self._sld_param1.value())
+            if mode == "rectangle":
+                p["tile_aspect"] = self._sld_param2.value() / 100.0
+        return p
 
     def _update_slider_labels(self):
+        mode = self._current_mode()
+        _, _, _, label_fn = _MODE_PARAM1[mode]
+        self._lbl_param1.setText(label_fn(self._sld_param1.value()))
+        self._lbl_param2.setText(f"Tile Aspect: {self._sld_param2.value() / 100.0:.2f}×")
+
         p = self._current_params()
-        self._lbl_segments.setText(f"Segments: {p['num_segments']}")
         self._lbl_rotation.setText(f"Rotation: {p['rotation_deg']:.1f}°")
         self._lbl_zoom.setText(f"Zoom: {p['zoom']:.2f}×")
         self._lbl_cx.setText(f"Center X: {p['center_x_pct']:.1f}%")
@@ -325,12 +384,15 @@ class MainWindow(QMainWindow):
         self._schedule_update()
 
     def _reset_all(self):
+        mode = self._current_mode()
+        _, _, default, _ = _MODE_PARAM1[mode]
         for sld, val in [
-            (self._sld_segments, 8),
+            (self._sld_param1,  default),
+            (self._sld_param2,  100),
             (self._sld_rotation, 0),
-            (self._sld_zoom, 100),
-            (self._sld_cx, 500),
-            (self._sld_cy, 500),
+            (self._sld_zoom,     100),
+            (self._sld_cx,       500),
+            (self._sld_cy,       500),
         ]:
             sld.blockSignals(True)
             sld.setValue(val)
@@ -351,19 +413,17 @@ class MainWindow(QMainWindow):
     def _fire_worker(self):
         if self._preview_arr is None:
             return
-        # Cancel any in-flight worker
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
             self._worker.quit()
             self._worker.wait(500)
 
         params = self._current_params()
-        preview_w = self._preview_label.width()
-        preview_h = self._preview_label.height()
-        output_size = (max(preview_w, 100), max(preview_h, 100))
+        out_w = max(self._preview_label.width(), 100)
+        out_h = max(self._preview_label.height(), 100)
 
         self._worker = KaleidoscopeWorker(self)
-        self._worker.configure(self._preview_arr, params, output_size)
+        self._worker.configure(self._preview_arr, params, (out_w, out_h))
         self._worker.result_ready.connect(self._on_result)
         self._worker.error.connect(self._on_worker_error)
         self._worker.start()
@@ -390,14 +450,13 @@ class MainWindow(QMainWindow):
     def _load_image(self, path: str):
         try:
             img = Image.open(path)
-            img.load()  # force decode to catch corruption early
+            img.load()
         except (UnidentifiedImageError, Exception) as exc:
             QMessageBox.critical(self, "Cannot open image", str(exc))
             return
 
         self._pil_original = img
 
-        # Downscale for live preview if needed
         if max(img.width, img.height) > PREVIEW_MAX_DIM:
             preview = img.copy()
             preview.thumbnail((PREVIEW_MAX_DIM, PREVIEW_MAX_DIM), Image.LANCZOS)
@@ -405,16 +464,12 @@ class MainWindow(QMainWindow):
         else:
             self._pil_preview = img.copy()
 
-        # Convert preview to RGB(A) numpy array
         mode = self._pil_preview.mode
         if mode not in ("RGB", "RGBA"):
             self._pil_preview = self._pil_preview.convert("RGB")
         self._preview_arr = np.asarray(self._pil_preview)
 
-        # Update thumbnail
         self._thumbnail.set_image(img)
-
-        # Enable save
         self._btn_save.setEnabled(True)
         self._status(f"Loaded: {Path(path).name}  ({img.width}×{img.height})")
         self._schedule_update()
@@ -432,8 +487,7 @@ class MainWindow(QMainWindow):
     def _save_image(self):
         if self._pil_original is None:
             return
-
-        path, selected_filter = QFileDialog.getSaveFileName(
+        path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Kaleidoscope Image",
             "kaleidoscope.png",
@@ -444,30 +498,19 @@ class MainWindow(QMainWindow):
 
         self._status("Exporting at full resolution…")
         try:
-            # Work from original full-res image
             orig = self._pil_original
-            mode = orig.mode
-            if mode not in ("RGB", "RGBA"):
+            if orig.mode not in ("RGB", "RGBA"):
                 orig = orig.convert("RGB")
             src_arr = np.asarray(orig)
 
-            params = self._current_params()
-            result_arr = apply_kaleidoscope(
-                src_arr,
-                num_segments=params["num_segments"],
-                rotation_deg=params["rotation_deg"],
-                zoom=params["zoom"],
-                center_x_pct=params["center_x_pct"],
-                center_y_pct=params["center_y_pct"],
+            result_arr = apply_effect(
+                self._current_mode(), src_arr, self._current_params()
             )
 
             result_img = Image.fromarray(result_arr)
-
-            # JPEG requires RGB
             suffix = Path(path).suffix.lower()
             if suffix in (".jpg", ".jpeg") and result_img.mode == "RGBA":
                 result_img = result_img.convert("RGB")
-
             result_img.save(path)
             self._status(f"Saved: {Path(path).name}")
 
@@ -484,8 +527,7 @@ class MainWindow(QMainWindow):
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                ext = Path(url.toLocalFile()).suffix.lower()
-                if ext in self._ACCEPTED_EXTENSIONS:
+                if Path(url.toLocalFile()).suffix.lower() in self._ACCEPTED_EXTENSIONS:
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -507,10 +549,6 @@ class MainWindow(QMainWindow):
             self._worker.quit()
             self._worker.wait(2000)
         super().closeEvent(event)
-
-    # ------------------------------------------------------------------ #
-    # Misc                                                                 #
-    # ------------------------------------------------------------------ #
 
     def _status(self, msg: str):
         self._status_bar.showMessage(msg)
